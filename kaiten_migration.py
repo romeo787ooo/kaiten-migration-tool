@@ -23,11 +23,11 @@ class KaitenMigration:
 
     def make_source_request(self, endpoint: str, method: str = "GET", json_data: Dict = None, params: Dict = None) -> Dict:
         url = f"{self.source_base_url}/{endpoint}"
-        st.write(f"Making SOURCE request: {method} {url}")
-        if params:
-            st.write(f"With params: {json.dumps(params, indent=2)}")
-        if json_data:
-            st.write(f"With data: {json.dumps(json_data, indent=2)}")
+        # st.write(f"Making SOURCE request: {method} {url}") # Optional: uncomment for deep debug
+        # if params:
+        #     st.write(f"With params: {json.dumps(params, indent=2)}")
+        # if json_data:
+        #     st.write(f"With data: {json.dumps(json_data, indent=2)}")
             
         try:
             response = requests.request(
@@ -53,9 +53,9 @@ class KaitenMigration:
 
     def make_target_request(self, endpoint: str, method: str = "GET", json_data: Dict = None, files: Dict = None) -> Dict:
         url = f"{self.target_base_url}/{endpoint}"
-        st.write(f"Making TARGET request: {method} {url}")
-        if json_data:
-            st.write(f"With data: {json.dumps(json_data, indent=2)}")
+        # st.write(f"Making TARGET request: {method} {url}") # Optional: uncomment for deep debug
+        # if json_data:
+        #     st.write(f"With data: {json.dumps(json_data, indent=2, ensure_ascii=False)}")
             
         headers = self.target_headers.copy()
         if files:
@@ -77,7 +77,8 @@ class KaitenMigration:
             st.error(f"URL: {url}")
             st.error(f"Method: {method}")
             if json_data:
-                st.error(f"Data: {json_data}")
+                # Use ensure_ascii=False to correctly display Cyrillic characters in error logs
+                st.error(f"Data: {json.dumps(json_data, indent=2, ensure_ascii=False)}")
             if hasattr(e.response, 'text'):
                 st.error(f"Response: {e.response.text}")
             raise
@@ -210,6 +211,31 @@ class KaitenMigration:
                 self.temp_dir.rmdir()
             except Exception:
                 pass
+
+## >> ИЗМЕНЕНИЕ: Добавлена новая вспомогательная функция
+def prepare_properties_for_migration(source_properties: Optional[Dict]) -> Optional[Dict]:
+    """
+    Подготавливает кастомные поля для миграции.
+    Конвертирует сложные объекты (например, пользователей) в простой список ID,
+    который ожидает API при создании карточки.
+    """
+    if not source_properties:
+        return None
+
+    prepared_props = {}
+    for key, value in source_properties.items():
+        # Проверяем, является ли значение списком словарей (как список пользователей)
+        if isinstance(value, list) and value and isinstance(value[0], dict) and 'id' in value[0]:
+            # Извлекаем только 'id' из каждого элемента списка
+            prepared_props[key] = [item['id'] for item in value if 'id' in item]
+        else:
+            # Для простых значений (строка, число, список чисел) копируем как есть
+            prepared_props[key] = value
+            
+    return prepared_props
+
+
+## >> ИЗМЕНЕНИЕ: Функция migrate_cards полностью заменена на исправленную версию
 def migrate_cards(migration_instance, cards_to_migrate, target_board_id, target_column_id, 
                  target_lane_id, progress_bar, status_text, log_container):
     """Функция для миграции выбранных карточек"""
@@ -222,6 +248,10 @@ def migrate_cards(migration_instance, cards_to_migrate, target_board_id, target_
                 status_text.text(f"Миграция карточки: {card_title}")
                 log_container.write(f"📋 Начало миграции карточки: {card_title}")
                 
+                # Подготовка кастомных полей для миграции
+                log_container.write("🛠️ Подготовка кастомных полей...")
+                prepared_properties = prepare_properties_for_migration(card.get('properties'))
+
                 # Prepare card data
                 new_card_data = {
                     "title": card['title'],
@@ -233,7 +263,7 @@ def migrate_cards(migration_instance, cards_to_migrate, target_board_id, target_
                     "size_text": card.get('size_text'),
                     "due_date": card.get('due_date'),
                     "asap": card.get('asap', False),
-                    "properties": card.get('properties', {}),
+                    "properties": prepared_properties, # Используем очищенные данные
                     "expires_later": card.get('expires_later', False)
                 }
                 
@@ -349,9 +379,9 @@ def main():
     if st.button("🔄 Загрузить доски"):
         try:
             # Add .kaiten.ru if needed
-            if not source_domain.endswith('.kaiten.ru'):
+            if source_domain and not source_domain.endswith('.kaiten.ru'):
                 source_domain += '.kaiten.ru'
-            if not target_domain.endswith('.kaiten.ru'):
+            if target_domain and not target_domain.endswith('.kaiten.ru'):
                 target_domain += '.kaiten.ru'
 
             st.session_state.migration_instance = KaitenMigration(
@@ -389,46 +419,50 @@ def main():
             )
             
             if source_board:
-                selected_board = next(b for b in st.session_state.source_boards if b['title'] == source_board)
+                selected_board = next((b for b in st.session_state.source_boards if b['title'] == source_board), None)
                 
-                # Source column selection
-                source_column = st.selectbox(
-                    "Выберите колонку источника",
-                    options=[col['title'] for col in selected_board.get('columns', [])],
-                    key="source_column"
-                )
+                if selected_board:
+                    # Source column selection
+                    source_column = st.selectbox(
+                        "Выберите колонку источника",
+                        options=[col['title'] for col in selected_board.get('columns', [])],
+                        key="source_column"
+                    )
 
-                if source_column:
-                    selected_column = next(c for c in selected_board['columns'] if c['title'] == source_column)
-                    try:
-                        # Load cards
-                        cards = st.session_state.migration_instance.make_source_request(
-                            "cards",
-                            params={
-                                "space_id": source_space_id,
-                                "board_id": selected_board['id'],
-                                "column_id": selected_column['id']
-                            }
-                        )
-                        st.session_state.cards_cache = {card['title']: card for card in cards}
-                        
-                        # Card selection
-                        selected_cards = st.multiselect(
-                            "Выберите карточки для миграции",
-                            options=list(st.session_state.cards_cache.keys())
-                        )
+                    if source_column:
+                        selected_column = next((c for c in selected_board['columns'] if c['title'] == source_column), None)
+                        if selected_column:
+                            try:
+                                # Load cards
+                                with st.spinner("Загрузка карточек..."):
+                                    cards = st.session_state.migration_instance.make_source_request(
+                                        "cards",
+                                        params={
+                                            "space_id": source_space_id,
+                                            "board_id": selected_board['id'],
+                                            "column_id": selected_column['id']
+                                        }
+                                    )
+                                st.session_state.cards_cache = {f"{card['title']} (ID: {card['id']})": card for card in cards}
+                                
+                                # Card selection
+                                selected_cards = st.multiselect(
+                                    "Выберите карточки для миграции",
+                                    options=list(st.session_state.cards_cache.keys())
+                                )
 
-                        # Show preview for selected card
-                        if selected_cards:
-                            preview_card = st.session_state.cards_cache[selected_cards[-1]]
-                            st.text_area(
-                                "Предпросмотр карточки",
-                                value=json.dumps(preview_card, indent=2, ensure_ascii=False),
-                                height=200
-                            )
+                                # Show preview for selected card
+                                if selected_cards:
+                                    preview_card_title = selected_cards[-1]
+                                    preview_card = st.session_state.cards_cache[preview_card_title]
+                                    st.text_area(
+                                        f"Предпросмотр карточки: {preview_card_title}",
+                                        value=json.dumps(preview_card, indent=2, ensure_ascii=False),
+                                        height=200
+                                    )
 
-                    except Exception as e:
-                        st.error(f"Ошибка при загрузке карточек: {str(e)}")
+                            except Exception as e:
+                                st.error(f"Ошибка при загрузке карточек: {str(e)}")
 
         with col2:
             st.subheader("📋 Целевые доски и колонки")
@@ -441,24 +475,27 @@ def main():
             )
             
             if target_board:
-                selected_target_board = next(b for b in st.session_state.target_boards if b['title'] == target_board)
+                selected_target_board = next((b for b in st.session_state.target_boards if b['title'] == target_board), None)
                 
-                # Target column selection
-                target_column = st.selectbox(
-                    "Выберите колонку назначения",
-                    options=[col['title'] for col in selected_target_board.get('columns', [])],
-                    key="target_column"
-                )
+                if selected_target_board:
+                    # Target column selection
+                    target_column = st.selectbox(
+                        "Выберите колонку назначения",
+                        options=[col['title'] for col in selected_target_board.get('columns', [])],
+                        key="target_column"
+                    )
 
         # Migration section
-        if st.session_state.cards_cache and selected_cards and target_board and target_column:
+        if 'selected_cards' in locals() and selected_cards and target_board and 'target_column' in locals() and target_column:
             st.subheader("📦 Миграция")
             
             if st.button("Начать миграцию выбранных карточек"):
                 # Setup progress indicators
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                log_container = st.empty()
+                log_container_expander = st.expander("Показать лог миграции", expanded=True)
+                log_container = log_container_expander.container()
+
                 
                 try:
                     # Get target board and column info
@@ -467,7 +504,7 @@ def main():
                     target_lane_id = target_board_data['lanes'][0]['id'] if target_board_data.get('lanes') else None
 
                     if not target_lane_id:
-                        st.error("У целевой доски нет полос")
+                        st.error("У целевой доски нет полос (lanes). Миграция невозможна.")
                         return
 
                     # Prepare cards for migration
@@ -486,10 +523,15 @@ def main():
                     )
 
                     # Show final results
-                    st.success(f"Успешно мигрировано {success_count} из {total_cards} карточек")
+                    if success_count == total_cards and total_cards > 0:
+                        st.success(f"Миграция успешно завершена! Перенесено {success_count} из {total_cards} карточек.")
+                    elif success_count > 0:
+                        st.warning(f"Миграция завершена с ошибками. Успешно перенесено {success_count} из {total_cards} карточек. Проверьте лог выше.")
+                    else:
+                        st.error(f"Миграция не удалась. Перенесено {success_count} из {total_cards} карточек. Проверьте лог выше.")
 
                 except Exception as e:
-                    st.error(f"Ошибка при миграции: {str(e)}")
+                    st.error(f"Критическая ошибка при запуске миграции: {str(e)}")
 
 if __name__ == "__main__":
     main()
