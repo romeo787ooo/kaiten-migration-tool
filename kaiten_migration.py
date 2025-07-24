@@ -37,7 +37,6 @@ class KaitenMigration:
                 files=files
             )
             response.raise_for_status()
-            # Handle empty response body for methods like DELETE or on 204 status
             if response.status_code == 204:
                 return None
             return response.json()
@@ -114,7 +113,10 @@ class KaitenMigration:
     def __del__(self):
         if hasattr(self, 'temp_dir') and self.temp_dir.exists():
             for f in self.temp_dir.iterdir(): f.unlink()
-            self.temp_dir.rmdir()
+            try:
+                self.temp_dir.rmdir()
+            except OSError: # Ignore errors if dir is not empty, though it should be
+                pass
 
 
 def remap_and_prepare_properties(source_props: Optional[Dict], source_fields: List[Dict], target_fields: List[Dict], log_container) -> Optional[Dict]:
@@ -143,7 +145,6 @@ def remap_and_prepare_properties(source_props: Optional[Dict], source_fields: Li
             log_container.warning(f"🤔 Поле '{source_field_name}' не найдено на целевой доске, пропущено.")
             continue
             
-        # Clean the value (extract IDs from objects if necessary)
         cleaned_value = value
         if isinstance(value, list) and value and isinstance(value[0], dict) and 'id' in value[0]:
             cleaned_value = [item['id'] for item in value if 'id' in item]
@@ -155,9 +156,37 @@ def remap_and_prepare_properties(source_props: Optional[Dict], source_fields: Li
     return prepared_props
 
 
+## >> НОВАЯ ФУНКЦИЯ: для загрузки всех карточек с пагинацией
+def get_all_cards_from_column(migration_instance: KaitenMigration, space_id: str, board_id: int, column_id: int) -> List[Dict]:
+    """
+    Загружает все карточки из указанной колонки, используя пагинацию.
+    """
+    all_cards = []
+    limit = 100
+    offset = 0
+    
+    while True:
+        params = {
+            "space_id": space_id,
+            "board_id": board_id,
+            "column_id": column_id,
+            "limit": limit,
+            "offset": offset
+        }
+        
+        batch_of_cards = migration_instance.make_source_request("cards", params=params)
+        
+        if not batch_of_cards:
+            break  # Больше карточек нет, выходим из цикла
+        
+        all_cards.extend(batch_of_cards)
+        offset += limit
+        
+    return all_cards
+
+
 def migrate_cards(migration_instance, cards_to_migrate, source_board_id, target_board_id, target_column_id, target_lane_id, progress_bar, status_text, log_container):
     try:
-        # Fetch board details to get custom fields for mapping
         log_container.write("ℹ️ Загрузка информации о полях исходной доски...")
         source_board_details = migration_instance.make_source_request(f"boards/{source_board_id}")
         source_custom_fields = source_board_details.get('custom_fields', [])
@@ -282,17 +311,26 @@ def main():
                 if selected_board:
                     column_titles = [c['title'] for c in selected_board.get('columns', [])]
                     source_column_title = st.selectbox("Выберите колонку источника", options=column_titles, key="source_column")
-
+                    
+                    ## >> ИЗМЕНЕНИЕ: Логика загрузки карточек заменена на вызов функции с пагинацией
                     if st.button("Загрузить карточки из колонки"):
                         selected_column = next((c for c in selected_board['columns'] if c['title'] == source_column_title), None)
                         if selected_column:
                             try:
-                                with st.spinner("Загрузка карточек..."):
-                                    cards = st.session_state.migration_instance.make_source_request("cards", params={
-                                        "board_id": selected_board['id'], "column_id": selected_column['id']
-                                    })
+                                with st.spinner("Загрузка карточек (может занять время для больших досок)..."):
+                                    # Вызываем новую функцию для загрузки ВСЕХ карточек
+                                    cards = get_all_cards_from_column(
+                                        st.session_state.migration_instance,
+                                        source_space_id,
+                                        selected_board['id'],
+                                        selected_column['id']
+                                    )
                                     st.session_state.cards_cache = {f"{c['title']} (ID: {c['id']})": c for c in cards}
+                                
                                 st.success(f"Загружено {len(st.session_state.cards_cache)} карточек.")
+                                if len(st.session_state.cards_cache) >= 100:
+                                    st.info("Была применена постраничная загрузка для получения всех карточек.")
+
                             except Exception as e:
                                 st.error(f"Ошибка при загрузке карточек: {str(e)}")
         
